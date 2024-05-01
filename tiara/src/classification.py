@@ -3,6 +3,7 @@ from typing import Dict, Union, List
 import warnings
 from contextlib import suppress
 
+from Bio.SeqIO.QualityIO import FastqGeneralIterator
 from Bio.SeqIO.FastaIO import SimpleFastaParser
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -29,7 +30,7 @@ class Classification:
 
     Methods
     -------
-        classify: classifies an entire fasta file
+        classify: classifies an entire input file
     """
 
     def __init__(
@@ -94,7 +95,111 @@ class Classification:
             for layer in range(self.layers)
         ]
 
-    def classify(self, sequences_fname: str, verbose=False) -> List[SingleResult]:
+    def classify_fastq(self, sequences_fname: str, verbose=False) -> List[SingleResult]:
+        """Perform a two-step classification.
+
+        Parameters
+        ----------
+            sequences_fname : a path to fastq file to classify
+
+        Returns
+        -------
+            predictions: a list of lists containing SingleResult objects.
+        """
+        if sequences_fname.endswith(".gz"):
+            with gzip.open(sequences_fname, "rt") as sequences_handle:
+                seqs = list(FastqGeneralIterator(sequences_handle))
+        else:
+            with open(sequences_fname, "r") as sequences_handle:
+                seqs = list(FastqGeneralIterator(sequences_handle))
+        seqs = [x for x in seqs if len(x[1]) >= self.min_len]
+
+        do = delayed(fun)
+        executor = Parallel(n_jobs=self.threads)
+        tasks = (
+            do(x[1], 0, self.predictors[0].transformer, self.params[0]["fragment_len"])
+            for x in seqs
+        )
+        cont_manager = (
+            time_context_manager("Calculating first stage sequence representations")
+            if verbose
+            else suppress()
+        )
+        with cont_manager:
+            seqs = list(
+                zip([x[0] for x in seqs], [x[1] for x in seqs], [x[2] for x in seqs], executor(tasks))
+            )
+
+        # Two-step classification
+        if verbose:
+            print("Performing first stage of classification.")
+            fst_stage_results = []
+            for seq in tqdm(seqs):
+                fst_stage_results.append(self.predictors[0].make_fastq_prediction(seq))
+        else:
+            # tasks = (do(seq) for seq in seqs)
+            # fst_stage_results = executor(tasks)
+            fst_stage_results = [
+                self.predictors[0].make_fastq_prediction(seq) for seq in seqs
+            ]
+        if verbose:
+            print("Done")
+        predictions = fst_stage_results
+        to_second_stage = []
+        # for prediction in fst_stage_results:
+        #     if prediction.cls[0] == "organelle":
+        #         to_second_stage.append(prediction)
+        #     else:
+        #         predictions.append(prediction)
+        if to_second_stage:
+            tasks = (
+                do(
+                    record.seq,
+                    1,
+                    self.predictors[1].transformer,
+                    self.params[1]["fragment_len"],
+                )
+                for record in to_second_stage
+            )
+            cont_manager = (
+                time_context_manager(
+                    "Calculating second stage sequence representations"
+                )
+                if verbose
+                else suppress()
+            )
+            with cont_manager:
+                seqs2 = list(
+                    zip(
+                        [record.desc for record in to_second_stage],
+                        [record.seq for record in to_second_stage],
+                        executor(tasks),
+                    )
+                )
+            if verbose:
+                print("Performing second stage of classification.")
+                snd_stage_results = []
+                for seq in tqdm(seqs2):
+                    snd_stage_results.append(self.predictors[1].make_fastq_prediction(seq))
+            else:
+                # tasks = (do_second_stage(seq) for seq in seqs2)
+                # snd_stage_results = executor(tasks)
+                snd_stage_results = [
+                    self.predictors[1].make_fastq_prediction(seq) for seq in seqs2
+                ]
+            for fst, snd in zip(to_second_stage, snd_stage_results):
+                assert fst.desc == snd.desc, "Descriptions not the same"
+                assert fst.seq == snd.seq, "Sequences not the same"
+                predictions.append(
+                    SingleResult(
+                        desc=fst.desc,
+                        seq=fst.seq,
+                        cls=[fst.cls[0], snd.cls[1]],
+                        probs=[fst.probs[0], snd.probs[1]],
+                    )
+                )
+        return predictions
+    def classify_fasta(self, sequences_fname: str, verbose=False) -> List[SingleResult]:
         """Perform a two-step classification.
 
         Parameters
@@ -134,22 +239,22 @@ class Classification:
             print("Performing first stage of classification.")
             fst_stage_results = []
             for seq in tqdm(seqs):
-                fst_stage_results.append(self.predictors[0].make_prediction(seq))
+                fst_stage_results.append(self.predictors[0].make_fasta_prediction(seq))
         else:
             # tasks = (do(seq) for seq in seqs)
             # fst_stage_results = executor(tasks)
             fst_stage_results = [
-                self.predictors[0].make_prediction(seq) for seq in seqs
+                self.predictors[0].make_fasta_prediction(seq) for seq in seqs
             ]
         if verbose:
             print("Done")
-        predictions = []
+        predictions = fst_stage_results
         to_second_stage = []
-        for prediction in fst_stage_results:
-            if prediction.cls[0] == "organelle":
-                to_second_stage.append(prediction)
-            else:
-                predictions.append(prediction)
+        # for prediction in fst_stage_results:
+        #     if prediction.cls[0] == "organelle":
+        #         to_second_stage.append(prediction)
+        #     else:
+        #         predictions.append(prediction)
         if to_second_stage:
             tasks = (
                 do(
@@ -179,12 +284,12 @@ class Classification:
                 print("Performing second stage of classification.")
                 snd_stage_results = []
                 for seq in tqdm(seqs2):
-                    snd_stage_results.append(self.predictors[1].make_prediction(seq))
+                    snd_stage_results.append(self.predictors[1].make_fasta_prediction(seq))
             else:
                 # tasks = (do_second_stage(seq) for seq in seqs2)
                 # snd_stage_results = executor(tasks)
                 snd_stage_results = [
-                    self.predictors[1].make_prediction(seq) for seq in seqs2
+                    self.predictors[1].make_fasta_prediction(seq) for seq in seqs2
                 ]
             for fst, snd in zip(to_second_stage, snd_stage_results):
                 assert fst.desc == snd.desc, "Descriptions not the same"
