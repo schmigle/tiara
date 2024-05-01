@@ -23,7 +23,7 @@ id_to_class = {
 }
 
 
-def predict_with_threshold(
+def predict_fastq_with_threshold(
     probs: np.ndarray, record: Tuple[str, str], prob_cutoff: float, layer: int
 ) -> SingleResult:
     """Predict the class.
@@ -31,7 +31,50 @@ def predict_with_threshold(
     Parameters
     ----------
         probs: an array of probabilities of belonging to each class (length 5 for layer 1, 3 for layer 2)
-        record: a tuple of strings (sequence description, sequence)
+        record: a tuple of strings (sequence description, sequence, quality scores)
+        prob_cutoff: a threshold for classifying to a class
+        layer: layer indice (0 or 1)
+    """
+    desc, seq, qual = record
+    counts = {id_to_class[layer][i]: value for i, value in enumerate(probs)}
+    chosen_class, prob_value = max(counts.items(), key=lambda x: x[1])
+    if prob_value > prob_cutoff:
+        if layer == 0 and chosen_class in ["bacteria", "archaea"]:
+            return SingleResult(
+                cls=["prokarya", "n/a"], desc=desc, seq=seq, qual=qual, probs=[counts, {}]
+            )
+        elif layer == 0 and chosen_class not in ["bacteria", "archaea"]:
+            return SingleResult(
+                cls=[chosen_class, "n/a"], desc=desc, seq=seq, qual=qual, probs=[counts, {}]
+            )
+        else:
+            return SingleResult(
+                cls=["organelle", chosen_class], desc=desc, seq=seq, qual=qual, probs=[{}, counts]
+            )
+    elif layer == 0 and counts["archaea"] + counts["bacteria"] > prob_cutoff:
+        return SingleResult(
+            cls=["prokarya", "n/a"], desc=desc, seq=seq, qual=qual, probs=[counts, {}]
+        )
+    else:
+        if layer == 0:
+            return SingleResult(
+                cls=["unknown", "n/a"], desc=desc, seq=seq, qual=qual, probs=[counts, {}]
+            )
+        else:
+            return SingleResult(
+                cls=["organelle", "unknown"], desc=desc, seq=seq, qual=qual, probs=[{}, counts]
+            )
+        
+
+def predict_fasta_with_threshold(
+    probs: np.ndarray, record: Tuple[str, str], prob_cutoff: float, layer: int
+) -> SingleResult:
+    """Predict the class.
+
+    Parameters
+    ----------
+        probs: an array of probabilities of belonging to each class (length 5 for layer 1, 3 for layer 2)
+        record: a tuple of strings (sequence description, sequence, quality scores)
         prob_cutoff: a threshold for classifying to a class
         layer: layer indice (0 or 1)
     """
@@ -39,7 +82,11 @@ def predict_with_threshold(
     counts = {id_to_class[layer][i]: value for i, value in enumerate(probs)}
     chosen_class, prob_value = max(counts.items(), key=lambda x: x[1])
     if prob_value > prob_cutoff:
-        if layer == 0:
+        if layer == 0 and chosen_class in ["bacteria", "archaea"]:
+            return SingleResult(
+                cls=["prokarya", "n/a"], desc=desc, seq=seq, probs=[counts, {}]
+            )
+        elif layer == 0 and chosen_class not in ["bacteria", "archaea"]:
             return SingleResult(
                 cls=[chosen_class, "n/a"], desc=desc, seq=seq, probs=[counts, {}]
             )
@@ -60,7 +107,6 @@ def predict_with_threshold(
             return SingleResult(
                 cls=["organelle", "unknown"], desc=desc, seq=seq, probs=[{}, counts]
             )
-
 
 class Prediction:
     """Performs a prediction based on supplied single record.
@@ -99,8 +145,8 @@ class Prediction:
         self.tfidf = tnf
         self.transformer = transformer
 
-    def make_prediction(
-        self, single_record: Tuple[str, str, np.ndarray]
+    def make_fastq_prediction(
+        self, single_record: Tuple[str, str, str, np.ndarray]
     ) -> SingleResult:
         """Make a prediction on a single sequence.
 
@@ -125,10 +171,44 @@ class Prediction:
             prediction:
                 A SingleResult class instance.
         """
-        desc, seq, bow = single_record
+        desc, seq, qual, bow = single_record
         # data = chop(seq, fragment_len=self.fragment_len)
         nnet_predictions = self.nnet.predict_proba(bow)
         mean_predictions = np.mean(nnet_predictions, axis=0)
-        return predict_with_threshold(
-            mean_predictions, (desc, seq), self.prob_cutoff, self.layer
+        return predict_fastq_with_threshold(
+            mean_predictions, (desc, seq, qual), self.prob_cutoff, self.layer
         )
+    
+    def make_fasta_prediction(
+            self, single_record: Tuple[str, str, np.ndarray]
+        ) -> SingleResult:
+            """Make a prediction on a single sequence.
+
+            The decision rule works as follows:
+                1. Perform a prediction on a list of vectors representing fragments of sequences
+                2. The resulting matrix with shape (number of fragments, number of classes) represents
+                at position (i, j) a probability that fragment i belongs to class j.
+                3. The mean of the matrix is taken, along the axis 0, which results in a vector
+                of length equal to number of classes.
+                4. The maximum of the vector is picked. If it doesn't exceed self.prob_cutoff, then
+                another possibility is considered: that individually bacteria and archea classes do not
+                exceed self.prob_cutoff, but together they do. If that's the case, the record is classified to
+                a general "prokarya" class. Else, the sequence is classified as "unknown".
+
+            Parameters
+            ----------
+                single_record:
+                    input sequence with its id (a tuple (sequence_id, sequence))
+
+            Returns
+            -------
+                prediction:
+                    A SingleResult class instance.
+            """
+            desc, seq, bow = single_record
+            # data = chop(seq, fragment_len=self.fragment_len)
+            nnet_predictions = self.nnet.predict_proba(bow)
+            mean_predictions = np.mean(nnet_predictions, axis=0)
+            return predict_fasta_with_threshold(
+                mean_predictions, (desc, seq), self.prob_cutoff, self.layer
+            )
