@@ -69,7 +69,7 @@ def main(test=None):
         import torch
 
         from tiara.src.classification import Classification
-        from tiara.src.utilities import sort_type, write_to_fasta
+        from tiara.src.utilities import sort_type, write_to_fastq, write_to_fasta
 
         torch.set_num_threads(args.threads)
 
@@ -112,7 +112,12 @@ def main(test=None):
             threads=args.threads,
         )
         start_time = time.time()
-        results = classifier.classify(args.input, args.verbose)
+        if args.fastq == True and args.fasta != True:
+            results = classifier.classify_fastq(args.input, args.verbose)
+        elif args.fasta == True and args.fastq != True:
+            results = classifier.classify_fasta(args.input, args.verbose)
+        else:
+            print("Input must be in fasta or fastq format")
         tot_time = time.time() - start_time
         print(f"Classification took {tot_time} seconds.")
         print(f"{len(results)/tot_time} sequences per second.")
@@ -172,10 +177,22 @@ def main(test=None):
                         with gzip.open(
                             os.path.join(directory, fname) + ".gz", "wt"
                         ) as handle:
-                            write_to_fasta(handle, grouped[short_mapping[cls]])
+                            if args.fasta == True and args.fastq != True:
+                                write_to_fasta(handle, grouped[short_mapping[cls]])
+                            elif args.fastq == True and args.fasta != True:
+                                write_to_fastq(handle, grouped[short_mapping[cls]])
+                            else:
+                                print("File must be fasta or fastq")
+                                break
                     else:
                         with open(os.path.join(directory, fname), "w") as handle:
-                            write_to_fasta(handle, grouped[short_mapping[cls]])
+                            if args.fasta == True and args.fastq != True:
+                                write_to_fasta(handle, grouped[short_mapping[cls]])
+                            elif args.fastq == True and args.fasta != True:
+                                write_to_fastq(handle, grouped[short_mapping[cls]])
+                            else:
+                                print("File must be fasta or fastq")
+                                break
         print()
 
 
@@ -386,5 +403,16 @@ def parse_arguments():
         action="store_true",
         help="""Whether to gzip results or not.""",
     )
-
+    parser.add_argument(
+        "--fastq", 
+        "--fq", 
+        action="store_true", 
+        help = "input and output are in fastq format"
+    )
+    parser.add_argument(
+        "--fasta", 
+        "--fa", 
+        action="store_true", 
+        help = "input and output are in fasta format"
+    )
     return parser.parse_args(args=None if sys.argv[1:] else ["--help"])
