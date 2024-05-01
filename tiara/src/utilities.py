@@ -32,6 +32,7 @@ class SingleResult:
     desc: str
     seq: str
     probs: List[Dict[str, float]]
+    qual: str = None
 
     def generate_line(self, prob=False):
         """Generates one line of the output summarizing the result."""
@@ -63,11 +64,17 @@ class TransformedDataset(Dataset):
         return self.transform(X, labels)
 
 
+def write_to_fastq(handle, seqs: List[SingleResult]):
+    for record in seqs:
+        handle.write("@" + record.desc + "\n")
+        handle.write(record.seq + "\n")
+        handle.write("+\n")
+        handle.write(record.qual + "\n")
+
 def write_to_fasta(handle, seqs: List[SingleResult]):
     for record in seqs:
         handle.write(">" + record.desc + "\n")
         handle.write(record.seq + "\n")
-
 
 def sort_type(results):
     """Creates a dictionary with classes as keys and sequences belonging to classes as values."""
